@@ -18,3 +18,4 @@ base64 = "0.13"
 base64-serde = "0.6"
 queryst = "2.0"
 serde_cbor = "0.8"
+quick-xml = { version = "0.20", features = ["serialize"]}

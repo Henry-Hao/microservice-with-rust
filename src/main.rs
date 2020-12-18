@@ -10,6 +10,7 @@ use rand::distributions::{Uniform, Normal, Bernoulli};
 use base64::STANDARD;
 use base64_serde::base64_serde_type;
 use queryst;
+use quick_xml;
 
 mod color;
 use color::Color;
@@ -130,6 +131,7 @@ fn serialize(format: &str, resp: &RngResponse) -> Result<Vec<u8>, failure::Error
     match format {
         "json" => Ok(serde_json::to_vec(resp)?),
         "cbor" => Ok(serde_cbor::to_vec(resp)?),
+        "xml" => Ok(quick_xml::se::to_string(resp)?.into_bytes()),
         _ => Err(format_err!("unsupported format:{}", format))
     }
 }
