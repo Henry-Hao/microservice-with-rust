@@ -3,12 +3,13 @@ use std::net::SocketAddr;
 use hyper::{ Body, Response, Request, Server, Error, StatusCode, Method };
 use futures::{ future, Future, Stream };
 use hyper::service::service_fn;
+use failure::{format_err, self};
 use std::ops::Range;
 use rand::Rng;
 use rand::distributions::{Uniform, Normal, Bernoulli};
-use failure::Fail;
 use base64::STANDARD;
 use base64_serde::base64_serde_type;
+use queryst;
 
 mod color;
 use color::Color;
@@ -67,11 +68,17 @@ fn microservice_handler(req:Request<Body>) -> Box<dyn Future<Item=Response<Body>
             Box::new(future::ok(Response::new(INDEX.into())))
         },
         (&Method::POST, "/random") => {
+            let format = {
+                let uri = req.uri().query().unwrap_or("");
+                let query = queryst::parse(uri).unwrap_or(serde_json::Value::Null);
+                query["format"].as_str().unwrap_or("json").to_string()
+            };
             let body = req.into_body().concat2()
-                .map(|chunk|{
+                .map(move |chunk|{
                     let res = serde_json::from_slice::<RngRequest>(chunk.as_ref())
                         .map(body_handler)
-                        .and_then(|resp| serde_json::to_string(&resp));
+                        .map_err(From::from)
+                        .and_then(|resp| serialize(&format, &resp));
                     match res {
                         Ok(body) => {
                             Response::new(body.into())
@@ -115,6 +122,15 @@ fn body_handler(request: RngRequest) -> RngResponse {
             let blue = rng.sample(Uniform::new_inclusive(from.blue, to.blue));
             RngResponse::Color(Color{red, green, blue})
         }
+    }
+}
+
+fn serialize(format: &str, resp: &RngResponse) -> Result<Vec<u8>, failure::Error> {
+    println!("{:?}",serde_json::to_string(resp));
+    match format {
+        "json" => Ok(serde_json::to_vec(resp)?),
+        "cbor" => Ok(serde_cbor::to_vec(resp)?),
+        _ => Err(format_err!("unsupported format:{}", format))
     }
 }
 
