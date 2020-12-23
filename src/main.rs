@@ -1,96 +1,117 @@
-use std::path::Path;
-use std::convert::Infallible;
-use hyper::{Method, Server, Request, StatusCode, Response, Body};
-use hyper::service::{ service_fn, make_service_fn};
-use lazy_static::lazy_static;
-use regex::Regex;
-use rand::{thread_rng, Rng};
-use rand::distributions::Alphanumeric;
-use std::sync::{ Mutex, Arc};
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
-use futures::stream::{StreamExt, TryStreamExt};
-use std::error::Error;
-use hyper_staticfile::FileBytesStream;
+use failure::Error;
+use jsonrpc::client::Client;
+use jsonrpc::error::Error as ClientError;
+use jsonrpc_http_server::ServerBuilder;
+use jsonrpc_core::{ IoHandler, Error as ServerError, Value };
+use log::{ debug, error, trace };
+use serde::Deserialize;
+use std::{ env, fmt, net::SocketAddr, thread };
+use std::sync::{ Mutex, mpsc::{ channel, Sender }};
 
+const START_ROLL_CALL: &str = "start_roll_call";
+const MARK_ITSELF: &str = "mark_itself";
 
-const INDEX: &'static str= r#"
-<!doctype html>
-<html>
-    <head>
-        <title> Rust Microservice </title>
-    </head>
-    <body>
-        <h3> Image service </h3>
-    </body>
-</html>
-"#;
-
-lazy_static!{
-    static ref DOWNLOAD_FILE: Regex = Regex::new("^/download/(?P<filename>\\w{20})?$").unwrap();
+struct Remote {
+    client: Client
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error + Send + Sync>>{
-    let files = Path::new("./files");
-    std::fs::create_dir(files)?;
-    let files = Arc::new(Mutex::new(files));
-    let addr = ([127, 0, 0, 1], 8080).into();
-    let make_svc = make_service_fn(|_conn| {
-        let files = Arc::clone(&files);
-        async { Ok::<_, Infallible>(service_fn(move |req| {
-            let files= Arc::clone(&files);
-            microservice_handler(req, files)
-        })) }
-    });
-    let server = Server::bind(&addr).serve(make_svc);
-    server.await?;
-
-    Ok(())
+enum Action {
+    StartRollCall,
+    MarkItself
 }
 
-async fn microservice_handler(req: Request<Body>, files: Arc<Mutex<&Path>>) -> Result<Response<Body>, Box<dyn Error + Send + Sync>> {
-    let method = req.method();
-    let path = req.uri().path();
-    match (method, path) {
-        (&Method::GET, "/") => {
-            Ok(Response::new(INDEX.into()))
-        },
-        (&Method::POST, "/upload") => {
-            let name: String = thread_rng().sample_iter(&Alphanumeric).take(20).map(char::from).collect();
-            let files = *(files.lock().unwrap());
-            let mut filepath  = files.to_path_buf();
-            filepath.push(&name);
-            let create_file = File::create(filepath).await?;
-            req.into_body().map_err(other).fold(create_file, |mut file, chunk| async move {
-                file.write_all(&chunk.unwrap()).await;
-                file
-            }).await;
-            Ok(Response::new(name.into()))
-        },
-        (&Method::GET, path) if path.starts_with("/download") => {
-            if let Some(cap) = DOWNLOAD_FILE.captures(path) {
-                let filename = cap.name("filename").unwrap().as_str();
-                let files = *files.lock().unwrap();
-                let mut filepath = files.to_path_buf();
-                filepath.push(&filename);
-                let open_file = File::open(filepath).await?;
-                let stream = FileBytesStream::new(open_file);
-                Ok(Response::new(Body::wrap_stream(stream)))
-            } else {
-                response_with_code(StatusCode::METHOD_NOT_ALLOWED)
-            }
-        },
-        _ => response_with_code(StatusCode::METHOD_NOT_ALLOWED)
+impl Remote {
+    fn new(addr: SocketAddr) -> Self {
+        let url = format!("http://{}", addr);
+        let client = Client::new(url, None, None);
+        Remote {client}
+    }
+
+    fn call_method<T>(&self, method: &str, args: &[Value]) -> Result<T, ClientError> 
+    where T: for<'de> Deserialize<'de>{
+        let request = self.client.build_request(method, args);
+        self.client.send_request(&request).and_then(|response| response.into_result::<T>()) 
+    }
+
+    fn start_roll_call(&self) -> Result<bool, ClientError> {
+        self.call_method(START_ROLL_CALL, &[])
+    }
+
+    fn mark_itself(&self) -> Result<bool, ClientError> {
+        self.call_method(MARK_ITSELF, &[])
     }
 }
 
-fn response_with_code(code: StatusCode) -> Result<Response<Body>, Box<dyn Error + Send + Sync>> {
-    Ok(Response::builder().status(code).body(Body::empty()).unwrap())
+fn spawn_worker() -> Result<Sender<Action>, Error> {
+    let (sender, receiver) = channel();
+    let next: SocketAddr = env::var("NEXT")?.parse()?;
+    thread::spawn(move || {
+        let remote = Remote::new(next);
+        let mut in_roll_call = false;
+        for action in receiver.iter() {
+            match action {
+                Action::StartRollCall => {
+                    if !in_roll_call {
+                        if remote.start_roll_call().is_ok() {
+                            debug!("ON");
+                            in_roll_call = true;
+                        }
+                    } else {
+                        if remote.mark_itself().is_ok() {
+                            debug!("OFF");
+                            in_roll_call = false;
+                        }
+                    }
+                },
+                Action::MarkItself => {
+                    if in_roll_call {
+                        if remote.mark_itself().is_ok() {
+                            debug!("OFF");
+                            in_roll_call = false;
+                        }
+                    } else {
+                        debug!("SKIP");
+                    }
+                }
+            }
+        }
+    });
+    Ok(sender)
 }
 
-fn other<E>(err: E) -> std::io::Error
-where E: Into<Box<dyn std::error::Error + Send + Sync>>
-{
-    std::io::Error::new(std::io::ErrorKind::Other, err)
+
+fn main() -> Result<(), Error> {
+    env_logger::init();
+    let original_sender = spawn_worker()?;
+    let addr: SocketAddr = env::var("ADDRESS")?.parse()?;
+    let mut io = IoHandler::new();
+    let sender = Mutex::new(original_sender.clone());
+    io.add_sync_method(START_ROLL_CALL, move |_| {
+        trace!("START_ROLL_CALL");
+        let sender = sender
+            .lock()
+            .map_err(to_internal)?;
+        sender.send(Action::StartRollCall)
+            .map_err(to_internal)
+            .map(|_| Value::Bool(true))
+    });
+
+    let sender = Mutex::new(original_sender.clone());
+    io.add_sync_method(MARK_ITSELF, move |_| {
+        trace!("MARK_ITSELF");
+        let sender = sender.lock().map_err(to_internal)?;
+        sender.send(Action::MarkItself)
+            .map_err(to_internal)
+            .map(|_| Value::Bool(true))
+    });
+
+    let server = ServerBuilder::new(io).start_http(&addr)?;
+
+    Ok(server.wait())
+}
+
+
+fn to_internal<E:fmt::Display>(err: E) -> ServerError {
+    error!("Error:{}", err);
+    ServerError::internal_error()
 }

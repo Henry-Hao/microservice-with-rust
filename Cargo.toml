@@ -8,10 +8,12 @@ description = "This is repo is used to track my learning with 'Hands-on Microser
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-hyper = "0.13"
-rand = "0.8"
-futures = "0.3.8"
-tokio = {version = "0.2", features=["full"] }
-lazy_static = "1.4"
-regex = "1.4.2"
-hyper-staticfile = "0.5.3"
+failure = "0.1"
+jsonrpc = "0.11"
+jsonrpc-http-server = "16.0"
+jsonrpc-core = "16.0"
+log = "0.4"
+env_logger = "0.6"
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = "1.0"
