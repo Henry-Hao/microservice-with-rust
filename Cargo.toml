@@ -8,25 +8,6 @@ description = "This is repo is used to track my learning with 'Hands-on Microser
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-failure = "0.1"
-log = "0.4"
-env_logger = "0.6"
-grpc = "~0.8"
-protobuf = "2.2"
-grpc-protobuf = "~0.8"
-futures = "~0.3"
+clap = "2.33.3"
+postgres = "0.18.1"
 
-
-[build_dependencies] 
-protoc-rust-grpc = "~0.8"
-
-
-[[bin]]
-name = "grpc-ring"
-path = "src/server.rs"
-test = false
-
-[[bin]]
-name = "grpc-ring-client"
-path = "src/client.rs"
-test = false
