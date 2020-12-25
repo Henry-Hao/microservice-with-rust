@@ -3,19 +3,14 @@ use clap::{
     crate_name, crate_authors, crate_version, crate_description,
     App, AppSettings, Arg, SubCommand
 };
-use mysql::{
-    OptsBuilder, Error as DbError, prelude::*, 
-};
-use rayon::prelude::*;
-use serde_derive::Deserialize;
-use r2d2::Pool;
-use r2d2_mysql::MysqlConnectionManager;
+use redis::{ Commands, RedisError };
+use r2d2_redis::RedisConnectionManager;
+use std::collections::HashMap;
 
 #[derive(Debug)]
 enum Error {
     CliError(std::num::ParseIntError),
-    DbError(DbError),
-    FromError(mysql::FromRowError),
+    DbError(RedisError),
     CsvError(csv::Error),
     PoolError(r2d2::Error),
 }
@@ -27,9 +22,6 @@ impl std::fmt::Display for Error {
                 write!(f, "CliError:{}", err)
             },
             Error::DbError(err) => {
-                write!(f, "DbError:{}", err)
-            },
-            Error::FromError(err) => {
                 write!(f, "DbError:{}", err)
             },
             Error::CsvError(err) => {
@@ -48,14 +40,9 @@ impl From<std::num::ParseIntError> for Error {
         Error::CliError(err)
     }
 }
-impl From<DbError> for Error {
-    fn from(err: DbError) -> Self {
+impl From<RedisError> for Error {
+    fn from(err: RedisError) -> Self {
         Error::DbError(err)
-    }
-}
-impl From<mysql::FromRowError> for Error {
-    fn from(err: mysql::FromRowError) -> Self {
-        Error::FromError(err)
     }
 }
 impl From<csv::Error> for Error {
@@ -69,35 +56,10 @@ impl From<r2d2::Error> for Error {
     }
 }
 
-#[derive(Deserialize)]
-struct User {
-    name: String,
-    email: String
-}
-
-impl FromRow for User {
-    fn from_row(row: mysql::Row) -> Self {
-        FromRow::from_row_opt(row).unwrap()
-    }
-
-    fn from_row_opt(row: mysql::Row) -> Result<Self, mysql::FromRowError>
-    where
-        Self: Sized {
-            let name = row.get_opt(0);
-            let email = row.get_opt(1);
-            match (name, email) {
-                (Some(Ok(name)), Some(Ok(email))) => {
-                    Ok(User {name, email})
-                },
-                _ => Err(mysql::FromRowError(row))
-            }
-    }
-}
-
-const CMD_CREATE: &str = "create";
+const CMD_REMOVE: &str = "remove";
 const CMD_ADD: &str = "add";
 const CMD_LIST: &str = "list";
-const CMD_IMPORT: &str= "import";
+const SESSIONS: &str = "sessions";
 
 
 fn main() -> Result<(), Error> {
@@ -124,56 +86,41 @@ fn main() -> Result<(), Error> {
              .value_name("DATABASE")
              .help("Set the databse of db connection")
              .takes_value(true))
-        .subcommand(SubCommand::with_name(CMD_CREATE).about("create users table"))
-        .subcommand(SubCommand::with_name(CMD_ADD).about("create a user record")
-                    .arg(Arg::with_name("name")
-                         .help("name of the user")
+        .subcommand(SubCommand::with_name(CMD_ADD).about("create a session record")
+                    .arg(Arg::with_name("token")
+                         .help("Token")
                          .required(true)
                          .index(1))
-                    .arg(Arg::with_name("email")
-                         .help("email of the user")
+                    .arg(Arg::with_name("uid")
+                         .help("uid of the user")
                          .required(true)
                          .index(2)))
-        .subcommand(SubCommand::with_name(CMD_LIST).about("print list of users"))
-        .subcommand(SubCommand::with_name(CMD_IMPORT).about("import users from csv"))
+        .subcommand(SubCommand::with_name(CMD_REMOVE).about("remove a session record")
+                    .arg(Arg::with_name("token")
+                         .help("Token")
+                         .required(true)
+                         .index(1)))
+        .subcommand(SubCommand::with_name(CMD_LIST).about("print list of sessions"))
         .get_matches();
-    let host = matches.value_of("host").or(Some("localhost"));
-    let port = matches.value_of("port").unwrap_or("3306").parse::<u16>()?;
-    let database = matches.value_of("database").or(Some("mysql"));
-    let mut builder = OptsBuilder::new();
-    builder.ip_or_hostname(host)
-        .tcp_port(port)
-        .db_name(database)
-        .user(Some("root"))
-        .pass(Some("password"));
-    let manager = MysqlConnectionManager::new(builder);
-    let pool = r2d2::Pool::new(manager).unwrap();
+    let host = matches.value_of("host").or(Some("127.0.0.1")).unwrap();
+    let port = matches.value_of("port").unwrap_or("6379").parse::<u16>()?;
+    let manager = RedisConnectionManager::new(format!("redis://{}:{}/", host, port).as_str())?;
+    let pool = r2d2::Pool::builder().build(manager)?;
     match matches.subcommand() {
-        (CMD_CREATE, _) => {
-            create_table(pool)?;
+        (CMD_REMOVE, Some(matches)) => {
+            let token = matches.value_of("token").unwrap();
+            remove_session(pool, token)?;
         },
         (CMD_LIST, _) => {
-            let users = list_users(pool)?;
-            for user in users {
-                println!("Name: {:20} Email: {:20}", user.name, user.email);
+            let sessions = list_session(pool)?;
+            for (token, uid) in sessions {
+                println!("Token: {:20} uid: {:20}", token, uid);
             }
         },
         (CMD_ADD, Some(matches)) => {
-            let name = matches.value_of("name").unwrap();
-            let email = matches.value_of("email").unwrap();
-            create_user(pool, &User{ name: name.to_string(), email: email.to_string() })?;
-        },
-        (CMD_IMPORT, _) => {
-            let mut rdr = csv::Reader::from_reader(std::io::stdin());
-            let mut users = Vec::new();
-            for user in rdr.deserialize() {
-                users.push(user?)
-            }
-            users.par_iter().map(|user| -> Result<(), failure::Error>{
-                let pool = pool.clone();
-                create_user(pool, &user)?;
-                Ok(())
-            }).for_each(drop);
+            let token = matches.value_of("token").unwrap();
+            let uid = matches.value_of("uid").unwrap();
+            add_session(pool, token, uid)?
         },
         _ => {
             matches.usage();
@@ -182,28 +129,17 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn create_table(pool: r2d2::Pool<MysqlConnectionManager>) -> Result<(), Error> {
-    let mut conn = pool.get()?;
-    conn.prep_exec(r"CREATE TABLE users (
-                        id INT(6) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                        name VARCHAR(50) NOT NULL,
-                        email VARCHAR(50) NOT NULL)", ())
-        .map(drop)
-        .map_err(From::from)
+fn add_session(pool: r2d2::Pool<RedisConnectionManager>, token:&str, uid: &str) -> Result<(), Error> {
+    let conn = pool.get()?;
+    conn.hset(SESSIONS, token, uid).map_err(From::from)
 }
 
-
-fn create_user(pool: r2d2::Pool<MysqlConnectionManager>, user: &User) -> Result<(), Error> {
-    let mut conn = pool.get()?;
-    conn.prep_exec("INSERT INTO users (name, email) VALUES (?, ?)", (&user.name, &user.email))
-        .map(drop)
-        .map_err(From::from)
+fn remove_session(pool: r2d2::Pool<RedisConnectionManager>, token: &str) -> Result<(), Error> {
+    let conn = pool.get()?;
+    conn.hdel(SESSIONS, token).map_err(From::from)
 }
 
-fn list_users(pool: r2d2::Pool<MysqlConnectionManager>) -> Result<Vec<User>, Error> {
-    let mut conn = pool.get()?;
-    let res = conn.prep_exec("SELECT name, email FROM users", ())?.into_iter()
-        .map(|row| mysql::from_row::<User>(row.unwrap()))
-        .collect();
-    Ok(res)
+fn list_session(pool: r2d2::Pool<RedisConnectionManager>) -> Result<HashMap<String, String>, Error> {
+    let conn = pool.get()?;
+    conn.hgetall(SESSIONS).map_err(From::from)
 }
