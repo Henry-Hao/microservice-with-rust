@@ -3,20 +3,21 @@ use clap::{
     crate_name, crate_authors, crate_version, crate_description,
     App, AppSettings, Arg, SubCommand
 };
-use postgres:: {
-    Error as DbError, NoTls, Client, Config, config::SslMode
+use mysql::{
+    OptsBuilder, Error as DbError, prelude::*, 
 };
 use rayon::prelude::*;
 use serde_derive::Deserialize;
-use r2d2_postgres::PostgresConnectionManager;
 use r2d2::Pool;
+use r2d2_mysql::MysqlConnectionManager;
 
 #[derive(Debug)]
 enum Error {
     CliError(std::num::ParseIntError),
     DbError(DbError),
+    FromError(mysql::FromRowError),
     CsvError(csv::Error),
-    PoolError(r2d2::Error)
+    PoolError(r2d2::Error),
 }
 
 impl std::fmt::Display for Error {
@@ -26,6 +27,9 @@ impl std::fmt::Display for Error {
                 write!(f, "CliError:{}", err)
             },
             Error::DbError(err) => {
+                write!(f, "DbError:{}", err)
+            },
+            Error::FromError(err) => {
                 write!(f, "DbError:{}", err)
             },
             Error::CsvError(err) => {
@@ -49,6 +53,11 @@ impl From<DbError> for Error {
         Error::DbError(err)
     }
 }
+impl From<mysql::FromRowError> for Error {
+    fn from(err: mysql::FromRowError) -> Self {
+        Error::FromError(err)
+    }
+}
 impl From<csv::Error> for Error {
     fn from(err:csv::Error) -> Self {
         Error::CsvError(err)
@@ -66,6 +75,24 @@ struct User {
     email: String
 }
 
+impl FromRow for User {
+    fn from_row(row: mysql::Row) -> Self {
+        FromRow::from_row_opt(row).unwrap()
+    }
+
+    fn from_row_opt(row: mysql::Row) -> Result<Self, mysql::FromRowError>
+    where
+        Self: Sized {
+            let name = row.get_opt(0);
+            let email = row.get_opt(1);
+            match (name, email) {
+                (Some(Ok(name)), Some(Ok(email))) => {
+                    Ok(User {name, email})
+                },
+                _ => Err(mysql::FromRowError(row))
+            }
+    }
+}
 
 const CMD_CREATE: &str = "create";
 const CMD_ADD: &str = "add";
@@ -110,14 +137,16 @@ fn main() -> Result<(), Error> {
         .subcommand(SubCommand::with_name(CMD_LIST).about("print list of users"))
         .subcommand(SubCommand::with_name(CMD_IMPORT).about("import users from csv"))
         .get_matches();
-    let host = matches.value_of("host").unwrap_or("localhost");
-    let port = matches.value_of("port").unwrap_or("5432").parse::<u16>()?;
-    let database = matches.value_of("database").unwrap_or("postgres");
-    let mut config = Config::new();
-    config.host(host)
-        .port(port)
-        .user(database);
-    let manager = PostgresConnectionManager::new(config.to_owned(), NoTls);
+    let host = matches.value_of("host").or(Some("localhost"));
+    let port = matches.value_of("port").unwrap_or("3306").parse::<u16>()?;
+    let database = matches.value_of("database").or(Some("mysql"));
+    let mut builder = OptsBuilder::new();
+    builder.ip_or_hostname(host)
+        .tcp_port(port)
+        .db_name(database)
+        .user(Some("root"))
+        .pass(Some("password"));
+    let manager = MysqlConnectionManager::new(builder);
     let pool = r2d2::Pool::new(manager).unwrap();
     match matches.subcommand() {
         (CMD_CREATE, _) => {
@@ -153,28 +182,28 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn create_table(pool: r2d2::Pool<PostgresConnectionManager<NoTls>>) -> Result<(), Error> {
+fn create_table(pool: r2d2::Pool<MysqlConnectionManager>) -> Result<(), Error> {
     let mut conn = pool.get()?;
-    conn.execute("CREATE TABLE users (
-                        id SERIAL PRIMARY KEY,
-                        name VARCHAR NOT NULL,
-                        email VARCHAR NOT NULL)", &[])
+    conn.prep_exec(r"CREATE TABLE users (
+                        id INT(6) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                        name VARCHAR(50) NOT NULL,
+                        email VARCHAR(50) NOT NULL)", ())
         .map(drop)
         .map_err(From::from)
 }
 
 
-fn create_user(pool: r2d2::Pool<PostgresConnectionManager<NoTls>>, user: &User) -> Result<(), Error> {
+fn create_user(pool: r2d2::Pool<MysqlConnectionManager>, user: &User) -> Result<(), Error> {
     let mut conn = pool.get()?;
-    conn.execute("INSERT INTO users (name, email) VALUES ($1, $2)", &[&user.name, &user.email])
+    conn.prep_exec("INSERT INTO users (name, email) VALUES (?, ?)", (&user.name, &user.email))
         .map(drop)
         .map_err(From::from)
 }
 
-fn list_users(pool: r2d2::Pool<PostgresConnectionManager<NoTls>>) -> Result<Vec<User>, Error> {
+fn list_users(pool: r2d2::Pool<MysqlConnectionManager>) -> Result<Vec<User>, Error> {
     let mut conn = pool.get()?;
-    let res = conn.query("SELECT name, email FROM users", &[])?.into_iter()
-        .map(|row| User {name: row.get(0), email: row.get(1)})
+    let res = conn.prep_exec("SELECT name, email FROM users", ())?.into_iter()
+        .map(|row| mysql::from_row::<User>(row.unwrap()))
         .collect();
     Ok(res)
 }
