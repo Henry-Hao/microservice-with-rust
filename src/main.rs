@@ -3,16 +3,25 @@ use clap::{
     crate_name, crate_authors, crate_version, crate_description,
     App, AppSettings, Arg, SubCommand
 };
-use redis::{ Commands, RedisError };
-use r2d2_redis::RedisConnectionManager;
-use std::collections::HashMap;
+use chrono::offset::Utc;
+use r2d2_mongodb::{ ConnectionOptions, MongodbConnectionManager };
+use mongodb::db::ThreadedDatabase;
+use bson::{ doc, bson };
+use serde_derive::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct Activity {
+    user_id: String,
+    activity: String,
+    datetime: String
+}
 
 #[derive(Debug)]
 enum Error {
     CliError(std::num::ParseIntError),
-    DbError(RedisError),
-    CsvError(csv::Error),
+    DbError(mongodb::error::Error),
     PoolError(r2d2::Error),
+    DecoderError(mongodb::DecoderError)
 }
 
 impl std::fmt::Display for Error {
@@ -24,8 +33,8 @@ impl std::fmt::Display for Error {
             Error::DbError(err) => {
                 write!(f, "DbError:{}", err)
             },
-            Error::CsvError(err) => {
-                write!(f, "CsvError:{}", err)
+            Error::DecoderError(err) => {
+                write!(f, "DecoderError:{}", err)
             },
             Error::PoolError(err) => {
                 write!(f, "PoolError:{}", err)
@@ -40,14 +49,9 @@ impl From<std::num::ParseIntError> for Error {
         Error::CliError(err)
     }
 }
-impl From<RedisError> for Error {
-    fn from(err: RedisError) -> Self {
+impl From<mongodb::error::Error> for Error {
+    fn from(err:mongodb::error::Error) -> Self {
         Error::DbError(err)
-    }
-}
-impl From<csv::Error> for Error {
-    fn from(err:csv::Error) -> Self {
-        Error::CsvError(err)
     }
 }
 impl From<r2d2::Error> for Error {
@@ -55,11 +59,14 @@ impl From<r2d2::Error> for Error {
         Error::PoolError(err)
     }
 }
+impl From<mongodb::DecoderError> for Error {
+    fn from(err:mongodb::DecoderError) -> Self {
+        Error::DecoderError(err)
+    }
+}
 
-const CMD_REMOVE: &str = "remove";
 const CMD_ADD: &str = "add";
 const CMD_LIST: &str = "list";
-const SESSIONS: &str = "sessions";
 
 
 fn main() -> Result<(), Error> {
@@ -87,40 +94,44 @@ fn main() -> Result<(), Error> {
              .help("Set the databse of db connection")
              .takes_value(true))
         .subcommand(SubCommand::with_name(CMD_ADD).about("create a session record")
-                    .arg(Arg::with_name("token")
-                         .help("Token")
+                    .arg(Arg::with_name("USER_ID")
+                         .help("Set the userid")
                          .required(true)
                          .index(1))
-                    .arg(Arg::with_name("uid")
-                         .help("uid of the user")
+                    .arg(Arg::with_name("ACTIVITY")
+                         .help("Set the activity")
                          .required(true)
                          .index(2)))
-        .subcommand(SubCommand::with_name(CMD_REMOVE).about("remove a session record")
-                    .arg(Arg::with_name("token")
-                         .help("Token")
-                         .required(true)
-                         .index(1)))
-        .subcommand(SubCommand::with_name(CMD_LIST).about("print list of sessions"))
+        .subcommand(SubCommand::with_name(CMD_LIST).about("print list of activities"))
         .get_matches();
     let host = matches.value_of("host").or(Some("127.0.0.1")).unwrap();
-    let port = matches.value_of("port").unwrap_or("6379").parse::<u16>()?;
-    let manager = RedisConnectionManager::new(format!("redis://{}:{}/", host, port).as_str())?;
-    let pool = r2d2::Pool::builder().build(manager)?;
+    let port = matches.value_of("port").unwrap_or("27017").parse::<u16>()?;
+    let database = matches.value_of("database").unwrap_or("admin");
+    let manager = MongodbConnectionManager::new(
+        ConnectionOptions::builder()
+        .with_host(host, port)
+        .with_db(database)
+        .build()
+        );
+    let pool = r2d2::Pool::builder().max_size(4).build(manager)?;
     match matches.subcommand() {
-        (CMD_REMOVE, Some(matches)) => {
-            let token = matches.value_of("token").unwrap();
-            remove_session(pool, token)?;
-        },
         (CMD_LIST, _) => {
-            let sessions = list_session(pool)?;
-            for (token, uid) in sessions {
-                println!("Token: {:20} uid: {:20}", token, uid);
+            let activities = list_activity(pool)?;
+            for activity in activities {
+                println!("User:{:20}, Activity: {:20}, Datetime: {:20}",
+                         activity.user_id, activity.activity, activity.datetime);
             }
+
         },
         (CMD_ADD, Some(matches)) => {
-            let token = matches.value_of("token").unwrap();
-            let uid = matches.value_of("uid").unwrap();
-            add_session(pool, token, uid)?
+            let user_id = matches.value_of("USER_ID").unwrap().to_string();
+            let activity = matches.value_of("ACTIVITY").unwrap().to_string();
+            let activity = Activity {
+                user_id,
+                activity,
+                datetime: Utc::now().to_string()
+            };
+            add_activity(pool, activity);
         },
         _ => {
             matches.usage();
@@ -129,17 +140,24 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn add_session(pool: r2d2::Pool<RedisConnectionManager>, token:&str, uid: &str) -> Result<(), Error> {
-    let conn = pool.get()?;
-    conn.hset(SESSIONS, token, uid).map_err(From::from)
+fn add_activity(pool: r2d2::Pool<MongodbConnectionManager>, activity: Activity) -> Result<(), Error> {
+    let doc = doc! {
+        "user_id": activity.user_id,
+        "activity": activity.activity,
+        "datetime": activity.datetime
+    };
+    let coll = pool.get()?.collection("activities");
+    coll.insert_one(doc, None).map(drop).map_err(From::from)
 }
 
-fn remove_session(pool: r2d2::Pool<RedisConnectionManager>, token: &str) -> Result<(), Error> {
-    let conn = pool.get()?;
-    conn.hdel(SESSIONS, token).map_err(From::from)
+fn list_activity(pool: r2d2::Pool<MongodbConnectionManager>) -> Result<Vec<Activity>, Error> {
+    let coll = pool.get()?.collection("activities");
+    coll.find(None,None)?
+        .try_fold(Vec::new(), |mut vec, doc| {
+            let doc = doc?;
+            let activity: Activity = bson::from_bson(bson::Bson::Document(doc))?;
+            vec.push(activity);
+            Ok(vec)
+        })
 }
 
-fn list_session(pool: r2d2::Pool<RedisConnectionManager>) -> Result<HashMap<String, String>, Error> {
-    let conn = pool.get()?;
-    conn.hgetall(SESSIONS).map_err(From::from)
-}
