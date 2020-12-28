@@ -9,11 +9,9 @@ description = "This is repo is used to track my learning with 'Hands-on Microser
 
 [dependencies]
 clap = "2.33.3"
-postgres = "0.18.1"
-csv = "1.0"
+diesel = { version = "^1.1.0", features = ["sqlite", "r2d2"] }
 failure = "0.1"
 r2d2 = "0.8"
-r2d2_postgres = "0.17"
-rayon = "1.0"
 serde = "1.0"
 serde_derive = "1.0"
+uuid = { version = "0.5", features = ["serde", "v4"] }
