@@ -7,3 +7,10 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+diesel = { version = "1.4.5", features = ["r2d2", "sqlite"] }
+env_logger = "0.8.2"
+failure = "0.1.8"
+log = "0.4.11"
+rouille = "3.0.0"
+serde = { version = "1.0.118", features = ["derive"] }
+uuid = { version = "0.8.1", features = ["serde", "v4"] }
