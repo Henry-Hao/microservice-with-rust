@@ -1,17 +1,47 @@
-use serde_derive::Serialize;
-use super::schema::users;
+use crate::schema::{channels, memberships, messages, users};
+use chrono::NaiveDateTime;
+// use chrono::naive::NaiveDateTime;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Debug, Queryable)]
+pub type Id = i32;
+
+#[derive(Serialize, Deserialize, Debug, Queryable, Identifiable)]
+#[table_name = "users"]
 pub struct User {
-    pub id: String,
-    pub name: String,
-    pub email: String
+    pub id: Id,
+    pub email: String,
 }
 
-#[derive(Insertable)]
-#[table_name="users"]
-pub struct NewUsers<'a> {
-    pub id: &'a str,
-    pub name: &'a str,
-    pub email: &'a str,
+#[derive(Serialize, Deserialize, Debug, Queryable, Identifiable, Associations)]
+#[table_name = "channels"]
+#[belongs_to(User)]
+pub struct Channel {
+    pub id: Id,
+    pub user_id: Id,
+    pub title: String,
+    pub is_public: bool,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+}
+
+#[derive(Serialize, Deserialize, Debug, Queryable, Identifiable, Associations)]
+#[table_name = "memberships"]
+#[belongs_to(User)]
+#[belongs_to(Channel)]
+pub struct Membership {
+    pub id: Id,
+    pub channel_id: Id,
+    pub user_id: Id,
+}
+
+#[derive(Serialize, Deserialize, Debug, Queryable, Identifiable, Associations)]
+#[table_name = "messages"]
+#[belongs_to(User)]
+#[belongs_to(Channel)]
+pub struct Message {
+    pub id: Id,
+    pub timestamp: NaiveDateTime,
+    pub channel_id: Id,
+    pub user_id: Id,
+    pub text: String,
 }
