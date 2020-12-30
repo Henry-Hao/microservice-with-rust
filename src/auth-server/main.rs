@@ -11,7 +11,7 @@ use log::debug;
 extern crate diesel;
 #[macro_use]
 extern crate rouille;
-mod schema;
+// mod shcema;
 mod model;
 
 #[derive(Serialize)]
@@ -49,7 +49,7 @@ fn handler(
             let user_email:String = data.email.trim().to_lowercase();
             let user_password:String = data.password.trim().to_lowercase();
             {
-                use self::schema::users::dsl::*;
+                use microservice_with_rust::schema::users::dsl::*;
                 let conn = pool.get()?;
                 let user_exists: bool = select(exists(users.filter(email.eq(user_email.clone())))).get_result(&conn)?;
         debug!("Request: {:?}", request);
@@ -60,7 +60,7 @@ fn handler(
                         email: &user_email,
                         password: &user_password
                     };
-                    diesel::insert_into(schema::users::table)
+                    diesel::insert_into(microservice_with_rust::schema::users::table)
                         .values(&new_user).execute(&conn)?;
                     Response::json(&())
                 } else {
@@ -77,7 +77,7 @@ fn handler(
             let user_email:String = data.email.trim().to_lowercase();
             let user_password:String = data.password.trim().to_lowercase();
             {
-                use self::schema::users::dsl::*;
+                use microservice_with_rust::schema::users::dsl::*;
                 let conn = pool.get()?;
                 let user = users.filter(email.eq(user_email))
                     .first::<model::User>(&conn)?;

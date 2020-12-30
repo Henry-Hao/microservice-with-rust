@@ -1,3 +1,4 @@
+// auth-server
 table! {
     users (id) {
         id -> Text,

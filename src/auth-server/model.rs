@@ -1,4 +1,4 @@
-use crate::schema::users;
+use microservice_with_rust::schema::users;
 use serde::{ Serialize, Deserialize };
 
 #[derive(Serialize, Deserialize, Debug, Queryable)]
